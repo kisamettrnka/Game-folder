@@ -23,7 +23,7 @@ async function setupDiscordSdk() {
 let canvas = null;
 let ctx = null;
 let lastTime = 0;
-let money = 5000;
+let money = 1000;
 let isGameOver = false;
 let isPaused = false;
 let gameSpeed = 1;
@@ -150,6 +150,8 @@ function loadImages() {
 
 
 // --- Inicializace hry ---
+let isGameStarted = false;
+
 function initializeGame() {
     console.log("initializeGame: Spouštění hlavní inicializace...");
     const gameCanvasContainer = document.getElementById('game-canvas-container');
@@ -174,10 +176,20 @@ function initializeGame() {
     // Připojení posluchačů událostí
     addEventListeners();
     
-    // Spuštění herní smyčky
-    lastTime = performance.now();
-    gameLoop(lastTime);
-    console.log("Herní smyčka spuštěna.");
+    // Herní smyčka se nespouští hned, čeká se na koupi pozemku
+    // lastTime = performance.now();
+    // gameLoop(lastTime);
+    console.log("Hra čeká na koupi pozemku.");
+    draw(); // Hned vykresli pole a tabulky
+}
+
+function startGameLoop() {
+    if (!isGameStarted) {
+        isGameStarted = true;
+        lastTime = performance.now();
+        updateUI(); // Aktualizace kalendáře a UI hned po startu hry
+        gameLoop(lastTime);
+    }
 }
 
 function generatePlotsAndPockets() {
@@ -195,6 +207,7 @@ function generatePlotsAndPockets() {
             owner: null,
             hasVrt: false,
             siloCount: 0,
+            price: 50 + Math.floor(Math.random() * 451) // 50 až 500
         });
     }
 
@@ -220,29 +233,21 @@ function generatePlotsAndPockets() {
 // --- Herní smyčka a kreslení ---
 
 function gameLoop(timestamp) {
-    if (!ctx) return;
-    const deltaTime = timestamp - lastTime;
-    lastTime = timestamp;
-
-    const effectiveDeltaTime = isPaused || isGameOver ? 0 : deltaTime * gameSpeed;
-    
-    // Aktualizace logiky
-    update(effectiveDeltaTime);
-    
-    // Kreslení
-    draw();
-
+    if (!isGameStarted) return; // Pokud hra neběží, nic nedělej
     if (isGameOver) {
         drawGameOver();
-        return; // Zastavíme smyčku
+        return;
     }
-
+    const dt = (timestamp - lastTime) * gameSpeed;
+    lastTime = timestamp;
+    update(dt);
+    draw();
     requestAnimationFrame(gameLoop);
 }
 
 function update(dt) {
+    if (!isGameStarted) return;
     if (dt <= 0) return;
-
     // Herní čas
     dayTimer += dt;
     if (dayTimer >= MS_PER_DAY) {
@@ -331,6 +336,12 @@ function draw() {
     
     // Pauza overlay
     if (isPaused) drawPauseScreen();
+
+    // V draw na konci dekrementuji timer zvýraznění
+    if (lastBoughtHighlightTimer > 0) {
+        lastBoughtHighlightTimer--;
+        if (lastBoughtHighlightTimer === 0) lastBoughtPlotId = null;
+    }
 }
 
 function updateUI() {
@@ -391,6 +402,18 @@ function drawSkyAndGround(groundLevel) {
 // Přidám globální pole pro hitboxy cedulí
 let plotSignHitboxes = [];
 
+function updatePlotSignHitboxes(groundLevel) {
+    plotSignHitboxes = [];
+    plots.forEach(plot => {
+        if (plot.owner === null) {
+            const signWidth = 70, signHeight = 20, postHeight = 15;
+            const signX = Math.round(plot.x + (plotWidth / 2) - (signWidth / 2));
+            const signY = Math.round(groundLevel - postHeight - signHeight);
+            plotSignHitboxes.push({ plotId: plot.id, x: signX, y: signY, width: signWidth, height: signHeight });
+        }
+    });
+}
+
 function drawPlots(groundLevel) {
     ctx.strokeStyle = '#D2B48C';
     ctx.lineWidth = 2;
@@ -404,29 +427,41 @@ function drawPlots(groundLevel) {
     }
     ctx.setLineDash([]);
 
-    plotSignHitboxes = [];
+    updatePlotSignHitboxes(groundLevel);
+    let hoveredAny = false;
     plots.forEach(plot => {
         if (plot.owner === null) {
-            const signWidth = 80, signHeight = 20, postHeight = 15;
+            const signWidth = 70, signHeight = 20, postHeight = 15;
             const signX = Math.round(plot.x + (plotWidth / 2) - (signWidth / 2));
             const signY = Math.round(groundLevel - postHeight - signHeight);
             ctx.fillStyle = '#8B4513';
             ctx.fillRect(Math.round(plot.x + (plotWidth / 2) - 2.5), groundLevel - postHeight, 5, postHeight);
             ctx.fillStyle = '#FFFFFF';
             ctx.fillRect(signX, signY, signWidth, signHeight);
-            ctx.strokeStyle = 'black';
-            ctx.lineWidth = 1;
+            // Zvýraznění tabulky při najetí myší
+            const isHovered = mousePos.x >= signX && mousePos.x <= signX + signWidth && mousePos.y >= signY && mousePos.y <= signY + signHeight;
+            if (isHovered) hoveredAny = true;
+            ctx.strokeStyle = isHovered ? '#FFD700' : 'black';
+            ctx.lineWidth = isHovered ? 3 : 1;
             ctx.strokeRect(signX, signY, signWidth, signHeight);
             ctx.fillStyle = 'black';
             ctx.font = '14px sans-serif';
             ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle'; // Zarovnání na střed vertikálně
-            ctx.fillText(`$${PLOT_COST}`, plot.x + plotWidth / 2, signY + signHeight / 2);
-            // Debug: vykresli průhledný hitbox
-            // ctx.save(); ctx.globalAlpha = 0.2; ctx.fillStyle = 'red'; ctx.fillRect(signX, signY, signWidth, signHeight); ctx.restore();
-            plotSignHitboxes.push({ plotId: plot.id, x: signX, y: signY, width: signWidth, height: signHeight });
+            ctx.textBaseline = 'middle';
+            ctx.fillText(`$${plot.price}`, plot.x + plotWidth / 2, signY + signHeight / 2);
+        } else if (plot.id === lastBoughtPlotId && lastBoughtHighlightTimer > 0) {
+            // Zvýraznění právě koupeného pozemku
+            ctx.save();
+            ctx.strokeStyle = '#FFD700';
+            ctx.lineWidth = 5;
+            ctx.strokeRect(plot.x, groundLevel, plotWidth, 10);
+            ctx.restore();
         }
     });
+    // Nastav kurzor podle toho, jestli je myš nad tabulkou
+    if (canvas) {
+        canvas.style.cursor = hoveredAny ? 'pointer' : 'default';
+    }
 }
 
 function drawOilPockets(groundLevel) {
@@ -540,17 +575,21 @@ function drawCompanyBuildings(groundLevel) {
     ctx.fillText(`$${leftIncPrice.toFixed(2)}`, bWidth/2, leftBaseY - 15);
     ctx.fillText(`$${rightIncPrice.toFixed(2)}`, rightBaseX + bWidth/2, leftBaseY - 15);
 
-    // Výpočet pro centrování šipek mezi horní hranou a číslem, posuneme je níže
+    // Výpočet pro centrování šipek a čísla
     const arrowSize = 25;
-    const priceY = leftBaseY - 15;
-    const controlY = Math.round((0 + priceY) / 2 - arrowSize / 2) - 45; // posun o 45 px výš
-    companyControls.leftUp = { x: 37, y: controlY, width: arrowSize, height: arrowSize };
-    companyControls.leftDown = { x: 37, y: controlY + 70, width: arrowSize, height: arrowSize };
-    companyControls.leftTrucks = { x: 37, y: controlY + 30, width: arrowSize, height: 35 };
+    const spacing = 70; // vzdálenost mezi horní a dolní šipkou
+    const centerY = groundLevel - bHeight - 60 - 50; // posun šipek přesně o 50px výše
+    
+    // Horní šipka
+    companyControls.leftUp = { x: 37, y: centerY - spacing/2, width: arrowSize, height: arrowSize };
+    // Dolní šipka
+    companyControls.leftDown = { x: 37, y: centerY + spacing/2, width: arrowSize, height: arrowSize };
+    // Číslo (nula) přesně mezi šipkami
+    companyControls.leftTrucks = { x: 37, y: centerY - arrowSize/2, width: arrowSize, height: 35 };
 
-    companyControls.rightUp = { x: canvas.width - 37 - arrowSize, y: controlY, width: arrowSize, height: arrowSize };
-    companyControls.rightDown = { x: canvas.width - 37 - arrowSize, y: controlY + 70, width: arrowSize, height: arrowSize };
-    companyControls.rightTrucks = { x: canvas.width - 37 - arrowSize, y: controlY + 30, width: arrowSize, height: 35 };
+    companyControls.rightUp = { x: canvas.width - 37 - arrowSize, y: centerY - spacing/2, width: arrowSize, height: arrowSize };
+    companyControls.rightDown = { x: canvas.width - 37 - arrowSize, y: centerY + spacing/2, width: arrowSize, height: arrowSize };
+    companyControls.rightTrucks = { x: canvas.width - 37 - arrowSize, y: centerY - arrowSize/2, width: arrowSize, height: 35 };
     
     drawArrowButton(companyControls.leftUp, true);
     drawArrowButton(companyControls.leftDown, false);
@@ -560,8 +599,9 @@ function drawCompanyBuildings(groundLevel) {
     ctx.font = 'bold 24px sans-serif';
     ctx.fillStyle = 'white';
     ctx.textAlign = 'center';
-    ctx.fillText(trucksAssignedLeft, companyControls.leftTrucks.x + arrowSize/2, companyControls.leftTrucks.y + 25);
-    ctx.fillText(trucksAssignedRight, companyControls.rightTrucks.x + arrowSize/2, companyControls.rightTrucks.y + 25);
+    // Y-pozice čísla bude přesně mezi šipkami
+    ctx.fillText(trucksAssignedLeft, companyControls.leftTrucks.x + arrowSize/2, centerY + 8);
+    ctx.fillText(trucksAssignedRight, companyControls.rightTrucks.x + arrowSize/2, centerY + 8);
 }
 
 function drawArrowButton(rect, isUp) {
@@ -942,6 +982,10 @@ function handleCanvasClick(event) {
     if (isGameOver) return;
     const clickPos = { x: mousePos.x, y: mousePos.y };
     const groundLevel = Math.floor(canvas.height / 3);
+    
+    // Vždy vygeneruj aktuální hitboxy tabulek
+    updatePlotSignHitboxes(groundLevel);
+    
     // Kontrola kliknutí na ovládání kamionů
     function isPointInRect(point, rect) {
         return point.x >= rect.x && point.x <= rect.x + rect.width &&
@@ -956,9 +1000,16 @@ function handleCanvasClick(event) {
     for (const sign of plotSignHitboxes) {
         if (isPointInRect(clickPos, sign)) {
             const plot = plots.find(p => p.id === sign.plotId);
-            if (plot && !plot.owner && money >= PLOT_COST) {
-                money -= PLOT_COST;
+            if (plot && !plot.owner && money >= plot.price) {
+                money -= plot.price;
                 plot.owner = 'player';
+                startGameLoop();
+                lastBoughtPlotId = plot.id;
+                lastBoughtHighlightTimer = 30; // Počet snímků zvýraznění
+                updatePlotSignHitboxes(groundLevel); // Okamžitě aktualizuj hitboxy
+                currentBuildMode = 'vrt'; // Aktivuj build mode pro vrt
+                selectedBuildPlotId = plot.id; // Povolit stavbu vrtu jen na tomto pozemku
+                draw(); // Okamžitě překresli po koupi
                 return;
             }
         }
@@ -967,7 +1018,12 @@ function handleCanvasClick(event) {
     // Interakce se světem
     const clickedPlot = getPlotAtX(clickPos.x);
     if (currentBuildMode) {
-        handleBuildModeClick(clickPos, clickedPlot, groundLevel);
+        // Povolit stavbu vrtu jen na právě koupeném pozemku
+        if (currentBuildMode === 'vrt' && clickedPlot && clickedPlot.id === selectedBuildPlotId) {
+            handleBuildModeClick(clickPos, clickedPlot, groundLevel);
+            selectedBuildPlotId = null; // Po stavbě zrušit omezení
+        }
+        // Jinak ignorovat kliknutí
     } else if (selectedDerrickPlotId !== null) {
         handlePipePlacementClick(clickPos, groundLevel);
     } else {
@@ -983,6 +1039,7 @@ function handleBuildModeClick(clickPos, plot, groundLevel) {
                 plot.hasVrt = true;
                 selectedDerrickPlotId = plot.id; // Po stavbě rovnou vybereme
                 cancelBuildMode();
+                draw(); // Okamžitě překresli po stavbě vrtu
             }
             break;
         case 'silo':
